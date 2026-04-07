@@ -12,8 +12,7 @@ from pypdf.generic import BooleanObject, NameObject, TextStringObject
 # ==========================================
 # CONFIG
 # ==========================================
-BASE_DIR = r"C:\Users\marce\OneDrive\Área de Trabalho\Requerimentos"
-TEMPLATE_PDF_PATH = os.path.join(BASE_DIR, "modelo.pdf")
+TEMPLATE_PDF_PATH = "modelo.pdf"
 
 st.set_page_config(page_title="Requerimentos", page_icon="📄", layout="wide")
 st.title("📄 Gerador de Requerimentos")
