@@ -60,6 +60,7 @@ PDF_FIELDS = {
     },
 }
 
+
 # ==========================================
 # UTIL
 # ==========================================
@@ -118,15 +119,15 @@ def normalizar_formato(valor: str) -> str:
 # A Nome
 # B Cartório
 # C Certidão
-# D Cônjuge
+# D Cônjuge em caso de casamento
 # E Termo nº
 # F Fls
 # G Livro
-# H Formato
+# H Formato da certidão
 # I Local
 # J Data
 # ==========================================
-def carregar_excel(arquivo_excel) -> list:
+def carregar_excel(arquivo_excel) -> list[dict]:
     wb = openpyxl.load_workbook(arquivo_excel, data_only=True)
     ws = wb.active
 
@@ -144,7 +145,7 @@ def carregar_excel(arquivo_excel) -> list:
         local = ws[f"I{i}"].value
         data = ws[f"J{i}"].value
 
-        if not any([nome, cartorio, tipo]):
+        if not any([nome, cartorio, tipo, conjuge, termo, fls, livro, formato, local, data]):
             continue
 
         registros.append(
@@ -169,7 +170,7 @@ def carregar_excel(arquivo_excel) -> list:
 # ==========================================
 # APARÊNCIA DOS CAMPOS
 # ==========================================
-def configurar_aparencia_campos(writer: PdfWriter):
+def configurar_aparencia_campos(writer: PdfWriter) -> None:
     root = writer._root_object
 
     if "/AcroForm" in root:
@@ -181,9 +182,18 @@ def configurar_aparencia_campos(writer: PdfWriter):
             }
         )
 
+        if "/Fields" in acroform:
+            for field_ref in acroform["/Fields"]:
+                field = field_ref.get_object()
+                field.update(
+                    {
+                        NameObject("/DA"): TextStringObject("/Helv 0 Tf 0 g")
+                    }
+                )
+
 
 # ==========================================
-# MONTAR CAMPOS
+# MONTAR CAMPOS DO PDF
 # ==========================================
 def montar_campos_pdf(registro: dict) -> dict:
     tipo = normalizar_tipo(registro["tipo"])
@@ -191,45 +201,64 @@ def montar_campos_pdf(registro: dict) -> dict:
 
     campos = {
         PDF_FIELDS["cabecalho"]["cartorio"]: registro["cartorio"],
-        PDF_FIELDS["rodape"]["local"]: registro["local"],
-        PDF_FIELDS["rodape"]["data"]: registro["data"],
+
+        PDF_FIELDS["nascimento"]["check"]: "",
+        PDF_FIELDS["casamento"]["check"]: "",
+        PDF_FIELDS["obito"]["check"]: "",
+
+        PDF_FIELDS["nascimento"]["nome"]: "",
+        PDF_FIELDS["nascimento"]["termo"]: "",
+        PDF_FIELDS["nascimento"]["fls"]: "",
+        PDF_FIELDS["nascimento"]["livro"]: "",
+
+        PDF_FIELDS["casamento"]["nome1"]: "",
+        PDF_FIELDS["casamento"]["nome2"]: "",
+        PDF_FIELDS["casamento"]["termo"]: "",
+        PDF_FIELDS["casamento"]["fls"]: "",
+        PDF_FIELDS["casamento"]["livro"]: "",
+
+        PDF_FIELDS["obito"]["nome"]: "",
+        PDF_FIELDS["obito"]["termo"]: "",
+        PDF_FIELDS["obito"]["fls"]: "",
+        PDF_FIELDS["obito"]["livro"]: "",
+
+        PDF_FIELDS["especificacoes"]["digitada"]: "",
+        PDF_FIELDS["especificacoes"]["fotocopia"]: "",
+        PDF_FIELDS["especificacoes"]["duas"]: "",
         PDF_FIELDS["especificacoes"]["firma_nao"]: "X",
         PDF_FIELDS["especificacoes"]["haia_nao"]: "X",
+
+        PDF_FIELDS["rodape"]["local"]: registro["local"],
+        PDF_FIELDS["rodape"]["data"]: registro["data"],
     }
 
     if tipo == "nascimento":
-        campos.update({
-            PDF_FIELDS["nascimento"]["check"]: "X",
-            PDF_FIELDS["nascimento"]["nome"]: registro["nome"],
-            PDF_FIELDS["nascimento"]["termo"]: registro["termo"],
-            PDF_FIELDS["nascimento"]["fls"]: registro["fls"],
-            PDF_FIELDS["nascimento"]["livro"]: registro["livro"],
-        })
+        campos[PDF_FIELDS["nascimento"]["check"]] = "X"
+        campos[PDF_FIELDS["nascimento"]["nome"]] = registro["nome"]
+        campos[PDF_FIELDS["nascimento"]["termo"]] = registro["termo"]
+        campos[PDF_FIELDS["nascimento"]["fls"]] = registro["fls"]
+        campos[PDF_FIELDS["nascimento"]["livro"]] = registro["livro"]
 
     elif tipo == "casamento":
-        campos.update({
-            PDF_FIELDS["casamento"]["check"]: "X",
-            PDF_FIELDS["casamento"]["nome1"]: registro["nome"],
-            PDF_FIELDS["casamento"]["nome2"]: registro["conjuge"],
-            PDF_FIELDS["casamento"]["termo"]: registro["termo"],
-            PDF_FIELDS["casamento"]["fls"]: registro["fls"],
-            PDF_FIELDS["casamento"]["livro"]: registro["livro"],
-        })
+        campos[PDF_FIELDS["casamento"]["check"]] = "X"
+        campos[PDF_FIELDS["casamento"]["nome1"]] = registro["nome"]
+        campos[PDF_FIELDS["casamento"]["nome2"]] = registro["conjuge"]
+        campos[PDF_FIELDS["casamento"]["termo"]] = registro["termo"]
+        campos[PDF_FIELDS["casamento"]["fls"]] = registro["fls"]
+        campos[PDF_FIELDS["casamento"]["livro"]] = registro["livro"]
 
     elif tipo == "obito":
-        campos.update({
-            PDF_FIELDS["obito"]["check"]: "X",
-            PDF_FIELDS["obito"]["nome"]: registro["nome"],
-            PDF_FIELDS["obito"]["termo"]: registro["termo"],
-            PDF_FIELDS["obito"]["fls"]: registro["fls"],
-            PDF_FIELDS["obito"]["livro"]: registro["livro"],
-        })
+        campos[PDF_FIELDS["obito"]["check"]] = "X"
+        campos[PDF_FIELDS["obito"]["nome"]] = registro["nome"]
+        campos[PDF_FIELDS["obito"]["termo"]] = registro["termo"]
+        campos[PDF_FIELDS["obito"]["fls"]] = registro["fls"]
+        campos[PDF_FIELDS["obito"]["livro"]] = registro["livro"]
 
     if formato == "digitada":
         campos[PDF_FIELDS["especificacoes"]["digitada"]] = "X"
     elif formato == "fotocopia":
         campos[PDF_FIELDS["especificacoes"]["fotocopia"]] = "X"
-    else:
+    elif formato == "duas":
         campos[PDF_FIELDS["especificacoes"]["duas"]] = "X"
 
     return campos
@@ -247,12 +276,15 @@ def gerar_pdf_preenchido(template_bytes: bytes, registro: dict) -> bytes:
 
     if reader.trailer["/Root"].get("/AcroForm"):
         writer._root_object.update(
-            {NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]}
+            {
+                NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]
+            }
         )
 
     configurar_aparencia_campos(writer)
 
     campos = montar_campos_pdf(registro)
+
     writer.update_page_form_field_values(
         writer.pages[0],
         campos,
@@ -265,9 +297,8 @@ def gerar_pdf_preenchido(template_bytes: bytes, registro: dict) -> bytes:
 
 
 # ==========================================
-# "IMPRIMIR" DE VERDADE
-# renderiza cada página e cria um PDF novo
-# sem campos editáveis
+# "IMPRIMIR" O PDF DE VERDADE
+# Sai sem campos editáveis
 # ==========================================
 def imprimir_pdf_virtual(pdf_bytes: bytes, dpi: int = 200) -> bytes:
     origem = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -281,12 +312,13 @@ def imprimir_pdf_virtual(pdf_bytes: bytes, dpi: int = 200) -> bytes:
         img_bytes = pix.tobytes("png")
 
         nova = destino.new_page(width=pagina.rect.width, height=pagina.rect.height)
-        nova.insert_image(pagina.rect, stream=img_bytes)
+        nova.insert_image(nova.rect, stream=img_bytes)
 
-    out = destino.tobytes(garbage=4, deflate=True)
+    saida = destino.tobytes(garbage=4, deflate=True)
+
     origem.close()
     destino.close()
-    return out
+    return saida
 
 
 def montar_nome_saida(registro: dict) -> str:
@@ -302,10 +334,16 @@ file = st.file_uploader("Excel", type=["xlsx"])
 
 if not os.path.exists(TEMPLATE_PDF_PATH):
     st.error("modelo.pdf não encontrado")
+    st.stop()
 
-elif file:
-    with open(TEMPLATE_PDF_PATH, "rb") as f:
-        template = f.read()
+template = None
+if file:
+    try:
+        with open(TEMPLATE_PDF_PATH, "rb") as f:
+            template = f.read()
+    except Exception:
+        st.error("Não foi possível abrir o modelo.pdf")
+        st.stop()
 
     dados = carregar_excel(file)
 
@@ -317,7 +355,7 @@ elif file:
             try:
                 pdf_preenchido = gerar_pdf_preenchido(template, reg)
                 pdf_final = imprimir_pdf_virtual(pdf_preenchido)
-                z.writestr(nome_saida(reg), pdf_final)
+                z.writestr(montar_nome_saida(reg), pdf_final)
             except Exception as e:
                 erros.append(f"Linha {reg['linha']}: {e}")
 
