@@ -4,6 +4,7 @@ import re
 import zipfile
 from datetime import datetime
 
+import fitz  # PyMuPDF
 import openpyxl
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
@@ -114,6 +115,16 @@ def normalizar_formato(valor: str) -> str:
 
 # ==========================================
 # LEITURA EXCEL
+# A Nome
+# B Cartório
+# C Certidão
+# D Cônjuge
+# E Termo nº
+# F Fls
+# G Livro
+# H Formato
+# I Local
+# J Data
 # ==========================================
 def carregar_excel(arquivo_excel) -> list:
     wb = openpyxl.load_workbook(arquivo_excel, data_only=True)
@@ -188,85 +199,100 @@ def montar_campos_pdf(registro: dict) -> dict:
 
     if tipo == "nascimento":
         campos.update({
-            "1": "X",
-            "Nome_1": registro["nome"],
-            "TextField": registro["termo"],
-            "TextField_1": registro["fls"],
-            "TextField_2": registro["livro"],
+            PDF_FIELDS["nascimento"]["check"]: "X",
+            PDF_FIELDS["nascimento"]["nome"]: registro["nome"],
+            PDF_FIELDS["nascimento"]["termo"]: registro["termo"],
+            PDF_FIELDS["nascimento"]["fls"]: registro["fls"],
+            PDF_FIELDS["nascimento"]["livro"]: registro["livro"],
         })
 
     elif tipo == "casamento":
         campos.update({
-            "TextField_3": "X",
-            "Text3": registro["nome"],
-            "Nome 2": registro["conjuge"],
-            "TextField_4": registro["termo"],
-            "TextField_5": registro["fls"],
-            "TextField_6": registro["livro"],
+            PDF_FIELDS["casamento"]["check"]: "X",
+            PDF_FIELDS["casamento"]["nome1"]: registro["nome"],
+            PDF_FIELDS["casamento"]["nome2"]: registro["conjuge"],
+            PDF_FIELDS["casamento"]["termo"]: registro["termo"],
+            PDF_FIELDS["casamento"]["fls"]: registro["fls"],
+            PDF_FIELDS["casamento"]["livro"]: registro["livro"],
         })
 
     elif tipo == "obito":
         campos.update({
-            "TextField_7": "X",
-            "Nome_2": registro["nome"],
-            "Termo nº": registro["termo"],
-            "Fls": registro["fls"],
-            "Livro": registro["livro"],
+            PDF_FIELDS["obito"]["check"]: "X",
+            PDF_FIELDS["obito"]["nome"]: registro["nome"],
+            PDF_FIELDS["obito"]["termo"]: registro["termo"],
+            PDF_FIELDS["obito"]["fls"]: registro["fls"],
+            PDF_FIELDS["obito"]["livro"]: registro["livro"],
         })
 
     if formato == "digitada":
-        campos["TextField_16"] = "X"
+        campos[PDF_FIELDS["especificacoes"]["digitada"]] = "X"
     elif formato == "fotocopia":
-        campos["TextField_17"] = "X"
+        campos[PDF_FIELDS["especificacoes"]["fotocopia"]] = "X"
     else:
-        campos["TextField_18"] = "X"
+        campos[PDF_FIELDS["especificacoes"]["duas"]] = "X"
 
     return campos
 
 
 # ==========================================
-# GERAR PDF NORMAL
+# GERAR PDF PREENCHIDO
 # ==========================================
-def gerar_pdf_preenchido(template_bytes, registro):
+def gerar_pdf_preenchido(template_bytes: bytes, registro: dict) -> bytes:
     reader = PdfReader(io.BytesIO(template_bytes))
     writer = PdfWriter()
 
     for page in reader.pages:
         writer.add_page(page)
 
+    if reader.trailer["/Root"].get("/AcroForm"):
+        writer._root_object.update(
+            {NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]}
+        )
+
     configurar_aparencia_campos(writer)
 
     campos = montar_campos_pdf(registro)
+    writer.update_page_form_field_values(
+        writer.pages[0],
+        campos,
+        auto_regenerate=True,
+    )
 
-    writer.update_page_form_field_values(writer.pages[0], campos)
-
-    buffer = io.BytesIO()
-    writer.write(buffer)
-    return buffer.getvalue()
+    saida = io.BytesIO()
+    writer.write(saida)
+    return saida.getvalue()
 
 
 # ==========================================
-# "IMPRIMIR" PDF (CORREÇÃO DO GOV)
+# "IMPRIMIR" DE VERDADE
+# renderiza cada página e cria um PDF novo
+# sem campos editáveis
 # ==========================================
-def flatten_pdf(pdf_bytes):
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    writer = PdfWriter()
+def imprimir_pdf_virtual(pdf_bytes: bytes, dpi: int = 200) -> bytes:
+    origem = fitz.open(stream=pdf_bytes, filetype="pdf")
+    destino = fitz.open()
 
-    for page in reader.pages:
-        writer.add_page(page)
+    zoom = dpi / 72.0
+    matrix = fitz.Matrix(zoom, zoom)
 
-    # remove formulário → vira PDF "impresso"
-    if "/AcroForm" in writer._root_object:
-        del writer._root_object["/AcroForm"]
+    for pagina in origem:
+        pix = pagina.get_pixmap(matrix=matrix, alpha=False)
+        img_bytes = pix.tobytes("png")
 
-    buffer = io.BytesIO()
-    writer.write(buffer)
-    return buffer.getvalue()
+        nova = destino.new_page(width=pagina.rect.width, height=pagina.rect.height)
+        nova.insert_image(pagina.rect, stream=img_bytes)
+
+    out = destino.tobytes(garbage=4, deflate=True)
+    origem.close()
+    destino.close()
+    return out
 
 
-def nome_saida(registro):
+def montar_nome_saida(registro: dict) -> str:
     tipo = normalizar_tipo(registro["tipo"]).capitalize()
-    return f"Requerimento_{tipo}_{sanitizar_nome_arquivo(registro['nome'])}.pdf"
+    nome = sanitizar_nome_arquivo(registro["nome"])
+    return f"Requerimento_{tipo}_{nome}.pdf"
 
 
 # ==========================================
@@ -278,21 +304,37 @@ if not os.path.exists(TEMPLATE_PDF_PATH):
     st.error("modelo.pdf não encontrado")
 
 elif file:
-    template = open(TEMPLATE_PDF_PATH, "rb").read()
+    with open(TEMPLATE_PDF_PATH, "rb") as f:
+        template = f.read()
+
     dados = carregar_excel(file)
 
     zip_buffer = io.BytesIO()
+    erros = []
 
-    with zipfile.ZipFile(zip_buffer, "w") as z:
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
         for reg in dados:
-            pdf = gerar_pdf_preenchido(template, reg)
-            pdf_final = flatten_pdf(pdf)  # 🔥 AQUI ESTÁ A MÁGICA
-            z.writestr(nome_saida(reg), pdf_final)
+            try:
+                pdf_preenchido = gerar_pdf_preenchido(template, reg)
+                pdf_final = imprimir_pdf_virtual(pdf_preenchido)
+                z.writestr(nome_saida(reg), pdf_final)
+            except Exception as e:
+                erros.append(f"Linha {reg['linha']}: {e}")
 
     zip_buffer.seek(0)
 
+    if erros:
+        st.error("Algumas linhas falharam:")
+        for erro in erros:
+            st.write(f"- {erro}")
+
     st.download_button(
         "📦 Baixar PDFs",
-        data=zip_buffer,
-        file_name="requerimentos.zip"
+        data=zip_buffer.getvalue(),
+        file_name="requerimentos.zip",
+        mime="application/zip",
+        use_container_width=True,
     )
+
+else:
+    st.info("Envie a planilha")
